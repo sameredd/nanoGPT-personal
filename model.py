@@ -16,15 +16,81 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 class LayerNorm(nn.Module):
-    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
+    """ LayerNorm but with an optional bias and gain. PyTorch doesn't support simply bias=False """
 
-    def __init__(self, ndim, bias):
+    def __init__(self, ndim, bias=True, gain=True):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
+        self.eps = 1e-5
+        self.gain = nn.Parameter(torch.ones(ndim)) if gain else None
         self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
 
     def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+        mean = input.mean(-1, keepdim=True)
+        std = input.std(-1, keepdim=True)
+        norm = (input - mean) / (std + 1e-5)
+        if self.gain is not None:
+            norm = norm * self.gain
+        if self.bias is not None:
+            norm = norm + self.bias
+        return norm
+    
+class RmsNorm(nn.Module):
+    """ Root Mean Square LayerNorm """
+
+    def __init__(self, ndim, bias=True, gain=True):
+        super().__init__()
+        self.eps = 1e-5
+        self.gain = nn.Parameter(torch.ones(ndim)) if gain else None
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+
+    def forward(self, input):
+        rms = torch.sqrt(torch.mean(input**2, dim=-1, keepdim=True))
+        norm = input / (rms + self.eps)
+        if self.gain is not None:
+            norm = norm * self.gain
+        if self.bias is not None:
+            norm = norm + self.bias
+        return norm
+    
+class IdentityNorm(nn.Module):
+    """A pseudo-norm that does nothing."""
+    def __init__(self, ndim, bias=True, gain=True):
+        super().__init__()
+
+    def forward(self, input):
+        return input
+    
+class FactorizedEmbedding(nn.Module):
+    """Factorized embedding layer for faster training and inference."""
+    def __init__(self, vocab_size, embd_dim, factor=(1/8)):
+        super().__init__()
+        r = int(embd_dim * factor)
+        self.embd_factors = nn.Parameter(torch.randn(vocab_size, r)) # Low dimensional token embeddings
+        self.embd_projs = nn.Parameter(torch.randn(r, embd_dim)) # Up projection to latent dim
+
+    def forward(self, x):
+        """
+        x is a tensor of longs with shape (b, t, 1) representing token indices.
+        outputs a tensor of shape (b, t, c) witc corresponding embeddings.
+        """
+        x = F.embedding(x, self.embd_factors) # (b,t,1) -> (b,t,r)
+        x = x @ self.embd_projs # (b,t,r) @ (r, c) -> (b,t,c)
+        return x
+    
+class FactorizedLinear(nn.Module):
+    """Factorized linear layer for faster training and inference."""
+    def __init__(self, in_dim, out_dim, factor=(1/8)): # For lm_head in_dim = c, out_dim = vocab
+        super().__init__()
+        r = int(in_dim * factor)
+        self.w1 = nn.Linear(in_dim, r)
+        self.w2 = nn.Linear(r, out_dim)
+
+    def forward(self, x):
+        """
+        x is a tensor of shape (b, t, in_dim)
+        outputs a tensor of shape (b, t, out_dim)
+        """
+        return self.w2(self.w1(x))
 
 class CausalSelfAttention(nn.Module):
 
@@ -95,14 +161,16 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = configure_norm(config)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = configure_norm(config)
         self.mlp = MLP(config)
+        self.ln_3 = configure_norm(config) # TODO: Configure or remove
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
+        x = self.ln_3(x) # TODO: Configure or remove
         return x
 
 @dataclass
@@ -113,7 +181,24 @@ class GPTConfig:
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.0
-    bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    bias: bool = False # bias in Linear layers
+    norm_type: str = 'layer' # either 'layer' or 'rms' for LayerNorm or RmsNorm
+    norm_bias: bool = False # True: bias in LayerNorms, like GPT-2. False: a bit better and faster
+    norm_gain: bool = False # Same but with weight parameter in LayerNorm
+    factorize_embed: bool = False # use factorized embedding for token embedding 
+
+def configure_norm(config):
+    # select the type of normalization to use
+    args = dict(ndim=config.n_embd, bias=config.norm_bias, gain=config .norm_gain)
+    if config.norm_type == 'layer':
+        return LayerNorm(**args)
+    elif config.norm_type == 'rms':
+        return RmsNorm(**args)
+    elif config.norm_type == 'none':
+        return IdentityNorm(**args)
+    else:
+        raise ValueError(f"Unrecognized norm type '{config.norm_type}'")
+    
 
 class GPT(nn.Module):
 
@@ -123,19 +208,32 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
 
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
-        ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        if config.factorize_embed:
+            print("Using factorized embedding")
+            self.use_embed_weight_tying = False
+            wte = FactorizedEmbedding(config.vocab_size, config.n_embd)
+            self.lm_head = FactorizedLinear(config.n_embd, config.vocab_size)
+        else:
+            wte = nn.Embedding(config.vocab_size, config.n_embd)
+            self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = wte,
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = configure_norm(config)
+        ))
+
+        if not config.factorize_embed:
+            self.use_embed_weight_tying = True
+            self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
         # init all weights
         self.apply(self._init_weights)
@@ -145,18 +243,36 @@ class GPT(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
         # report number of parameters
-        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        total_params = self.get_num_params(non_pos_embed=True)
+        embedding_params = self.get_num_token_embedding_params()
+        non_embedding_params = total_params - embedding_params
+        print(f"Total parameters: {total_params/1e6:.2f}M")
+        print(f"Embedding parameters: {embedding_params/1e6:.2f}M")
+        print(f"Non-embedding parameters: {non_embedding_params/1e6:.2f}M")
 
-    def get_num_params(self, non_embedding=True):
+    def get_num_token_embedding_params(self):
+        if self.config.factorize_embed:
+            # wp = self.transformer.wte.embd_factors.numel() + self.transformer.wte.embd_projs.numel()
+            # lp = self.lm_head.w1.weight.numel() + self.lm_head.w2.weight.numel()
+            # return wp + lp
+            return self.count_params(self.transformer.wte) + self.count_params(self.lm_head)
+        return self.transformer.wte.weight.numel()
+
+    def get_num_params(self, non_pos_embed=True):
         """
         Return the number of parameters in the model.
         For non-embedding count (default), the position embeddings get subtracted.
         The token embeddings would too, except due to the parameter sharing these
         params are actually used as weights in the final layer, so we include them.
         """
-        n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
+        n_params = self.count_params(self)
+        if non_pos_embed:
             n_params -= self.transformer.wpe.weight.numel()
+        return n_params
+
+    @staticmethod
+    def count_params(module):
+        n_params = sum(p.numel() for p in module.parameters())
         return n_params
 
     def _init_weights(self, module):
