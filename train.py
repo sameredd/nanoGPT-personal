@@ -40,6 +40,12 @@ $ python config/mini_owt.py train.py --compile=False --device=mps
 
 Mini Math:
 $ python train.py config/mini_math.py --compile=False --device=mps
+
+# GPU RUNS
+$ python train.py config/small_math.py
+
+
+
 """
 
 import os

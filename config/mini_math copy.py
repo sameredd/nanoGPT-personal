@@ -8,7 +8,7 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'nanogpt'
-wandb_run_name = 'minigpt-math-v2-embed-more-norm-no-factorize-bigger'
+wandb_run_name = 'math_small-v3-gain_rmsnorm-L16-H384'
 out_dir = os.path.join('out', wandb_run_name)
 # data
 dataset = 'math' # 'openwebtext' or 'shakespeare_char' or 'math
@@ -16,15 +16,15 @@ gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 8 # if gradient_accumulation_steps > 1, this is the micro-batch size
 
 # model # NOTE MODERN BERT USES DEEP AND NARROW LAYERS! 22 layers, 768 hidden size, 150 M params
-# this one h
+
 block_size = 128 # sequence length
-n_layer = 12
-n_embd = 384
-n_head = 4
-norm_gain = False
+n_layer = 16
+n_embd = 384 # Should be divisible by 64
+n_head = n_embd // 64 # 64 dim heads
+norm_gain = True
 norm_bias = False
 norm_type = 'rms' # either 'layer' or 'rms' or 'none' for LayerNorm or RmsNorm
-factorize_embed = True
+factorize_embed = False
 
 # learning rate and scheduler
 learning_rate = 1e-5 # max learning rate

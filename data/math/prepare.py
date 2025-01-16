@@ -21,15 +21,15 @@ enc = tiktoken.get_encoding("gpt2")
 if __name__ == '__main__':
     # See configs here - https://huggingface.co/datasets/math-ai/AutoMathText
     datasets = [
-        wb_dataset = load_dataset("math-ai/AutoMathText", 'web-0.50-to-1.00', num_proc=num_proc_load_dataset, trust_remote_code=True)['train'],
-        arxiv_dataset = load_dataset("math-ai/AutoMathText", 'arxiv-full', num_proc=num_proc_load_dataset, trust_remote_code=True)['train'], 
+        load_dataset("math-ai/AutoMathText", 'web-0.50-to-1.00', num_proc=num_proc_load_dataset, trust_remote_code=True)['train'],
+        # load_dataset("math-ai/AutoMathText", 'arxiv-full', num_proc=num_proc_load_dataset, trust_remote_code=True)['train'], 
     ] # Only train split available
-    keep_keys = ['text', 'meta']
-    datasets = [d.select(keep_keys) for d in datasets]
+    keep_keys = ['text']
+    datasets = [d.select_columns(keep_keys) for d in datasets]
     dataset = concatenate_datasets(datasets)
     split_dataset = dataset.train_test_split(test_size=0.0005, seed=2357, shuffle=True)
     split_dataset['val'] = split_dataset.pop('test') # rename the test split to val
-
+    
     # this results in:
     # >>> split_dataset
     # DatasetDict({
@@ -65,7 +65,7 @@ if __name__ == '__main__':
         filename = os.path.join(os.path.dirname(__file__), f'{split}.bin')
         dtype = np.uint16 # (can do since enc.max_token_value == 50256 is < 2**16)
         arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
-        total_batches = 1024
+        total_batches = 512
 
         idx = 0
         for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
