@@ -42,8 +42,9 @@ Mini Math:
 $ python train.py config/mini_math.py --compile=False --device=mps
 
 # GPU RUNS
-$ python train.py config/small_math.py
+$ torchrun --standalone --nproc_per_node=4 train.py config/small_math.py
 
+Add `--wandb_log=True` for wandb logging.
 
 
 """
@@ -69,10 +70,11 @@ eval_interval = 1000
 log_interval = 1
 eval_iters = 100
 eval_only = False  # if True, script exits right after the first eval
-always_save_checkpoint = False  # if True, always save a checkpoint after each eval
+always_save_checkpoint = True  # if True, always save a checkpoint after each eval
+save_new_checkpoint = True # if True, dont override checkpoint
 init_from = "scratch"  # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
-wandb_log = True  # disabled by default
+wandb_log = False  # disabled by default
 wandb_project = "nanogpt"
 wandb_run_name = "minigpt-shakespeare-v5-layernorm"
 out_dir = os.path.join(out_dir, wandb_run_name)
@@ -119,6 +121,7 @@ dtype = (
     else "float16"
 )  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True  # use PyTorch 2.0 to compile the model to be faster
+print(f"Using {dtype=}")
 # -----------------------------------------------------------------------------
 config_keys = [
     k
@@ -142,8 +145,9 @@ if ddp:
     seed_offset = ddp_rank  # each process gets a different seed
     # world_size number of processes will be training simultaneously, so we can scale
     # down the desired gradient accumulation iterations per process proportionally
-    assert gradient_accumulation_steps % ddp_world_size == 0
-    gradient_accumulation_steps //= ddp_world_size
+    if gradient_accumulation_steps > 1:
+        assert gradient_accumulation_steps % ddp_world_size == 0
+        gradient_accumulation_steps //= ddp_world_size
 else:
     # if not ddp, we are running on a single gpu, and one process
     master_process = True
@@ -354,6 +358,7 @@ t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
 running_mfu = -1.0
+checkpoint_idx = 0
 while True:
 
     # determine and set the learning rate for this iteration
@@ -383,8 +388,9 @@ while True:
                     "best_val_loss": best_val_loss,
                     "config": config,
                 }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
+                ckpt_path = os.path.join(out_dir, f"ckpt{checkpoint_idx}_step{iter_num}.pt")
+                print(f"saving checkpoint to {ckpt_path}")
+                torch.save(checkpoint, ckpt_path)
     if iter_num == 0 and eval_only:
         break
 
