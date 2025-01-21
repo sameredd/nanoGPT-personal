@@ -244,7 +244,7 @@ if init_from == "scratch":
     model_args["vocab_size"] = meta_vocab_size if meta_vocab_size is not None else 50304
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
-elif init_from == "resume":
+elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
     ckpt_path = os.path.join(out_dir, "ckpt.pt")
@@ -282,6 +282,36 @@ elif init_from.startswith("gpt2"):
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ["n_layer", "n_head", "n_embd", "block_size", "bias", "vocab_size"]:
         model_args[k] = getattr(model.config, k)
+else:
+    # Try to interprent 'init_from' as a path to a checkpoint file.
+    print(f"Strating training from {init_from}")
+    # resume training from a checkpoint.
+    checkpoint = torch.load(init_from, map_location=device)
+    checkpoint_model_args = checkpoint["model_args"]
+    for k in [
+        "n_layer",
+        "n_head",
+        "n_embd",
+        "block_size",
+        "bias",
+        "vocab_size",
+        "norm_bias",
+        "norm_gain",
+    ]:
+        model_args[k] = checkpoint_model_args[k]
+
+    # create the model
+    gptconf = GPTConfig(**model_args)
+    model = GPT(gptconf)
+    state_dict = checkpoint["model"]
+    # fix the keys of the state dictionary :(
+    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+    unwanted_prefix = "_orig_mod."
+    for k, v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+    model.load_state_dict(state_dict)
+
 # crop down the model block size if desired, using model surgery
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
@@ -291,7 +321,10 @@ if block_size < model.config.block_size:
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == "float16"))
+if device == 'cpu':
+    scaler = lambda x: x
+else:
+    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == "float16"))
 
 # optimizer
 optimizer = model.configure_optimizers(
@@ -358,7 +391,6 @@ t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
 running_mfu = -1.0
-checkpoint_idx = 0
 while True:
 
     # determine and set the learning rate for this iteration
@@ -368,7 +400,7 @@ while True:
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        losses = estimate_loss("val")
+        losses = estimate_loss(train=False, val=True)
         print(f"step {iter_num}: val loss {losses['val']:.4f}")
         if wandb_log:
             wandb.log(
@@ -388,7 +420,7 @@ while True:
                     "best_val_loss": best_val_loss,
                     "config": config,
                 }
-                ckpt_path = os.path.join(out_dir, f"ckpt{checkpoint_idx}_step{iter_num}.pt")
+                ckpt_path = os.path.join(out_dir, f"ckpt_step{iter_num}.pt")
                 print(f"saving checkpoint to {ckpt_path}")
                 torch.save(checkpoint, ckpt_path)
     if iter_num == 0 and eval_only:

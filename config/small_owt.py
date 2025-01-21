@@ -6,11 +6,11 @@ log_interval = 2
 eval_iters = int(eval_interval * 0.07)
 # wandb logging
 wandb_project = 'nanogpt'
-wandb_run_name = 'math_small_v1'
+wandb_run_name = 'owt_small_v2'
 out_dir = os.path.join('out', wandb_run_name)
 
 # data
-dataset = 'math' # 'openwebtext' or 'shakespeare_char' or 'math
+dataset = 'openwebtext' # 'openwebtext' or 'shakespeare_char' or 'math
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 64 # if gradient_accumulation_steps > 1, this is the micro-batch size
 
@@ -28,7 +28,7 @@ norm_type = 'rms' # either 'layer' or 'rms' or 'none' for LayerNorm or RmsNorm
 norm_gain = False
 norm_bias = False
 
-# training length
+# training length -tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
 max_iters = 2.5e4 # total number of training iterations
 
 # learning rate schedule
